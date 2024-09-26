@@ -47,7 +47,6 @@ class DynamicStream(RestApiStream):
         tap: Any,
         name: str,
         records_path: str,
-        rest_method: str,
         path: str,
         params: Optional[dict] = None,
         headers: Optional[dict] = None,
@@ -79,7 +78,6 @@ class DynamicStream(RestApiStream):
         Args:
             tap: see tap.py
             name: see tap.py
-            rest_method: see tap.py
             path: see tap.py
             params: see tap.py
             headers: see tap.py
@@ -113,7 +111,6 @@ class DynamicStream(RestApiStream):
         if primary_keys is None:
             primary_keys = []
 
-        self.rest_method = rest_method
         self.name = name
         self.path = path
         self.params = params if params else {}
