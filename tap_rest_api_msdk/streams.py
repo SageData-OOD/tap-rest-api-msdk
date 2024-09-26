@@ -372,14 +372,18 @@ class DynamicStream(RestApiStream):
             # source field and query template.
             if self.source_search_field and self.source_search_query and last_run_date:
                 query_template = Template(self.source_search_query)
-                if self.use_request_body_not_params:
-                    params[self.source_search_field] = json.loads(
-                        query_template.substitute(last_run_date=last_run_date)
-                    )
-                else:
-                    params[self.source_search_field] = query_template.substitute(
-                        last_run_date=last_run_date
-                    )
+                # DP: below is original
+                # if self.use_request_body_not_params:
+                #     params[self.source_search_field] = json.loads(
+                #         query_template.substitute(last_run_date=last_run_date)
+                #     )
+                # else:
+                #     params[self.source_search_field] = query_template.substitute(
+                #         last_run_date=last_run_date
+                #     )
+                params[self.source_search_field] = query_template.substitute(
+                    last_run_date=last_run_date
+                )
             else:
                 params["sort"] = "asc"
                 params["order_by"] = self.replication_key
