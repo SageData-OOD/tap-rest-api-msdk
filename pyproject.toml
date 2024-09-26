@@ -25,6 +25,7 @@ genson = "^1.2.2"
 atomicwrites = "^1.4.0"
 requests-aws4auth = "^1.2.3"
 boto3 = "^1.26.156"
+cryptography = "37.0.4"
 
 [tool.poetry.dev-dependencies]
 pytest = "^8.2.2"

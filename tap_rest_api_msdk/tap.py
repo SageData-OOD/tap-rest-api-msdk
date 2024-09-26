@@ -29,6 +29,13 @@ class TapRestApiMsdk(Tap):
 
     common_properties = th.PropertiesList(
         th.Property(
+            "rest_method",
+            th.StringType,
+            default="GET",
+            required=False,
+            description="GET or POST method. Defaults to GET.",
+        ),
+        th.Property(
             "path",
             th.StringType,
             required=False,

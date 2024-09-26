@@ -47,6 +47,7 @@ class DynamicStream(RestApiStream):
         tap: Any,
         name: str,
         records_path: str,
+        rest_method: str,
         path: str,
         params: Optional[dict] = None,
         headers: Optional[dict] = None,
@@ -78,6 +79,7 @@ class DynamicStream(RestApiStream):
         Args:
             tap: see tap.py
             name: see tap.py
+            rest_method: see tap.py
             path: see tap.py
             params: see tap.py
             headers: see tap.py
@@ -111,6 +113,7 @@ class DynamicStream(RestApiStream):
         if primary_keys is None:
             primary_keys = []
 
+        self.rest_method = rest_method
         self.name = name
         self.path = path
         self.params = params if params else {}
@@ -555,14 +558,21 @@ class DynamicStream(RestApiStream):
             # source field and query template.
             if self.source_search_field and self.source_search_query and last_run_date:
                 query_template = Template(self.source_search_query)
-                if self.use_request_body_not_params:
-                    params[self.source_search_field] = json.loads(
-                        query_template.substitute(last_run_date=last_run_date)
-                    )
-                else:
-                    params[self.source_search_field] = query_template.substitute(
-                        last_run_date=last_run_date
-                    )
+
+                # DP: commented is original code
+                # if self.use_request_body_not_params:
+                #     params[self.source_search_field] = json.loads(
+                #         query_template.substitute(last_run_date=last_run_date)
+                #     )
+                # else:
+                #     params[self.source_search_field] = query_template.substitute(
+                #         last_run_date=last_run_date
+                #     )
+
+                params[self.source_search_field] = query_template.substitute(
+                    last_run_date=last_run_date
+                )
+
             elif self.source_search_field and last_run_date:
                 params[self.source_search_field] = "gt" + last_run_date
 
