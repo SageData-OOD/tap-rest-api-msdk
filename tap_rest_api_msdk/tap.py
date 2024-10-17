@@ -631,4 +631,12 @@ class TapRestApiMsdk(Tap):
                 break
 
         self.logger.debug(f"{builder.to_json(indent=2)}")
-        return builder.to_schema()
+        # DP: fix such that null only properties are converted to [string, null]
+        schema = builder.to_schema()
+
+        for _, details in schema.get('properties', {}).items():
+            if details.get('type') == 'null':
+                details['type'] = ['string', 'null']
+
+        return schema
+
