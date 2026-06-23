@@ -1,6 +1,11 @@
 import json
 
-from tap_rest_api_msdk.utils import flatten_json
+from tap_rest_api_msdk.utils import (
+    apply_incremental_search_params,
+    flatten_json,
+    format_replication_bookmark,
+    replication_key_schema_property,
+)
 
 
 def test_flatten_json():
@@ -19,3 +24,22 @@ def test_flatten_json():
     assert ret["c"] == json.dumps([{"foo": "bar"}, {"eggs": "spam"}])
     assert ret["d"] == json.dumps([4, 5])
     assert ret["e__f"] == 6
+
+
+def test_replication_key_schema_property():
+    assert replication_key_schema_property("ts") == {
+        "type": ["integer", "string", "null"]
+    }
+    assert replication_key_schema_property("@timestamp") == {
+        "type": ["string", "null"],
+        "format": "date-time",
+    }
+
+
+def test_format_replication_bookmark_preserves_unparseable_value():
+    assert format_replication_bookmark("not-a-date", "%Y-%m-%d") == "not-a-date"
+
+
+def test_apply_incremental_search_params_noop_without_last_run_date():
+    params = {"query": "state:bounced"}
+    assert apply_incremental_search_params(params, "date_from", "$last_run_date", "") == params

@@ -4,7 +4,6 @@ import copy
 import json
 from typing import Any, List, Optional
 
-import requests
 from genson import SchemaBuilder
 from singer_sdk import Tap
 from singer_sdk import typing as th
@@ -12,7 +11,13 @@ from singer_sdk.authenticators import APIAuthenticatorBase
 from singer_sdk.helpers.jsonpath import extract_jsonpath
 from tap_rest_api_msdk.auth import ConfigurableOAuthAuthenticator, get_authenticator
 from tap_rest_api_msdk.streams import DynamicStream
-from tap_rest_api_msdk.utils import flatten_json
+from tap_rest_api_msdk.utils import (
+    apply_incremental_search_params,
+    ensure_schema_has_replication_key,
+    flatten_json,
+    issue_api_request,
+    normalize_null_only_schema_types,
+)
 
 
 class TapRestApiMsdk(Tap):
@@ -140,6 +145,14 @@ class TapRestApiMsdk(Tap):
             '{ "meta.lastUpdated": { "gt": "$last_run_date" }}}] }} .'
             "Note: Any required double quotes in the query template must "
             "be escaped.",
+        ),
+        th.Property(
+            "last_run_date_format",
+            th.StringType,
+            required=False,
+            description="Optional strftime format for `$last_run_date` values sent to "
+            "the API. Defaults to `%Y-%m-%dT%H:%M:%S`. For Mailchimp "
+            "Transactional / Mandrill APIs use `%Y-%m-%d %H:%M:%S`.",
         ),
     )
 
@@ -486,16 +499,27 @@ class TapRestApiMsdk(Tap):
 
             else:
                 self.logger.info("No schema found. Inferring schema from API call.")
+                inference_records = stream.get(
+                    "num_inference_records",
+                    stream.get(
+                        "num_inference_keys",
+                        self.config["num_inference_records"],
+                    ),
+                )
                 schema = self.get_schema(
                     records_path,
                     except_keys,
-                    stream.get(
-                        "num_inference_records",
-                        self.config["num_inference_records"],
-                    ),
+                    inference_records,
                     path,
                     params,
                     headers,
+                    replication_key=replication_key,
+                    source_search_field=source_search_field,
+                    source_search_query=source_search_query,
+                    start_date=start_date,
+                    primary_keys=stream.get(
+                        "primary_keys", self.config.get("primary_keys", [])
+                    ),
                 )
 
             streams.append(
@@ -556,6 +580,11 @@ class TapRestApiMsdk(Tap):
         path: str,
         params: dict,
         headers: dict,
+        replication_key: Optional[str] = None,
+        source_search_field: Optional[str] = None,
+        source_search_query: Optional[str] = None,
+        start_date: Optional[str] = None,
+        primary_keys: Optional[list] = None,
     ) -> Any:
         """Infer schema from the first records returned by api. Creates a Stream object.
 
@@ -572,6 +601,11 @@ class TapRestApiMsdk(Tap):
             path: required - see config_jsonschema.
             params: required - see config_jsonschema.
             headers: required - see config_jsonschema.
+            replication_key: optional stream replication key.
+            source_search_field: optional incremental request field.
+            source_search_query: optional incremental request template.
+            start_date: optional initial replication date for discovery requests.
+            primary_keys: optional stream primary keys.
 
         Raises:
             ValueError: if the response is not valid or a record is not valid json.
@@ -580,36 +614,46 @@ class TapRestApiMsdk(Tap):
             A schema for the stream.
 
         """
-        # TODO: this request format is not very robust
-
-        # Initialise Variables
         auth_method = self.config.get("auth_method", "")
         self.http_auth = None
+        request_params = dict(params)
+        request_headers = dict(headers)
 
-        if auth_method and not auth_method == "no_auth":
-            # Obtaining Authenticator for authorisation to obtain a schema.
+        if auth_method and auth_method != "no_auth":
             get_authenticator(self)
 
-            # Get an initial oauth token if an oauth method
             if auth_method == "oauth" and isinstance(
                 self._authenticator, ConfigurableOAuthAuthenticator
             ):
                 self._authenticator.get_initial_oauth_token()
 
-            headers.update(getattr(self._authenticator, "auth_headers", {}))
-            params.update(getattr(self._authenticator, "auth_params", {}))
+            request_headers.update(getattr(self._authenticator, "auth_headers", {}))
+            request_params.update(getattr(self._authenticator, "auth_params", {}))
 
-        r = requests.get(
-            self.config["api_url"] + path,
-            auth=self.http_auth,
-            params=params,
-            headers=headers,
+        if replication_key and source_search_field and source_search_query and start_date:
+            request_params = apply_incremental_search_params(
+                request_params,
+                source_search_field,
+                source_search_query,
+                start_date,
+            )
+
+        response = issue_api_request(
+            api_url=self.config["api_url"],
+            path=path,
+            params=request_params,
+            headers=request_headers,
+            rest_method=self.config.get("rest_method", "GET"),
+            use_request_body_not_params=self.config.get(
+                "use_request_body_not_params", False
+            ),
+            http_auth=self.http_auth,
         )
-        if r.ok:
-            records = extract_jsonpath(records_path, input=r.json())
+        if response.ok:
+            records = extract_jsonpath(records_path, input=response.json())
         else:
-            self.logger.error(f"Error Connecting, message = {r.text}")
-            raise ValueError(r.text)
+            self.logger.error(f"Error Connecting, message = {response.text}")
+            raise ValueError(response.text)
 
         builder = SchemaBuilder()
         builder.add_schema(th.PropertiesList().to_dict())
@@ -623,7 +667,6 @@ class TapRestApiMsdk(Tap):
             )
 
             builder.add_object(flat_record)
-            # Optional add _sdc_raw_json field to store the raw message
             if self.config.get("store_raw_json_message"):
                 builder.add_object({"_sdc_raw_json": {}})
 
@@ -631,12 +674,19 @@ class TapRestApiMsdk(Tap):
                 break
 
         self.logger.debug(f"{builder.to_json(indent=2)}")
-        # DP: fix such that null only properties are converted to [string, null]
-        schema = builder.to_schema()
+        schema = normalize_null_only_schema_types(builder.to_schema())
 
-        for _, details in schema.get('properties', {}).items():
-            if details.get('type') == 'null':
-                details['type'] = ['string', 'null']
+        if replication_key and replication_key not in schema.get("properties", {}):
+            self.logger.warning(
+                "No records returned for schema inference; building minimal schema "
+                "including replication key '%s'.",
+                replication_key,
+            )
+            schema = ensure_schema_has_replication_key(
+                schema,
+                replication_key,
+                primary_keys,
+            )
 
         return schema
 

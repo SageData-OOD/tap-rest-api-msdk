@@ -1,7 +1,11 @@
 """Basic utility functions."""
 
 import json
-from typing import Any, Optional
+from datetime import datetime
+from string import Template
+from typing import Any, Dict, Optional
+
+import requests
 
 
 def flatten_json(
@@ -96,6 +100,146 @@ def unnest_dict(d):
     return result
 
 
+def format_replication_bookmark(raw: Any, fmt: str) -> Any:
+    """Format a bookmark value for API query parameters.
+
+    Args:
+        raw: Bookmark value from state or config.
+        fmt: ``strftime`` format string.
+
+    Returns:
+        Formatted bookmark, or the original value if parsing fails.
+
+    """
+    if raw is None or raw == "":
+        return raw
+
+    raw_str = str(raw)
+    try:
+        normalized = raw_str.replace("Z", "+00:00")
+        if "." in normalized:
+            date_part, remainder = normalized.split(".", 1)
+            tz_index = max(remainder.find("+"), remainder.find("-"))
+            if tz_index == -1:
+                fraction = remainder[:6].ljust(6, "0")[:6]
+                normalized = f"{date_part}.{fraction}"
+            else:
+                fraction = remainder[:tz_index][:6].ljust(6, "0")[:6]
+                normalized = f"{date_part}.{fraction}{remainder[tz_index:]}"
+
+        return datetime.fromisoformat(normalized).strftime(fmt)
+    except ValueError:
+        return raw_str
+
+
+def get_last_run_date_format(config: dict) -> str:
+    """Return the configured bookmark date format for API requests."""
+    return config.get("last_run_date_format", "%Y-%m-%dT%H:%M:%S")
+
+
+def apply_incremental_search_params(
+    params: dict,
+    source_search_field: Optional[str],
+    source_search_query: Optional[str],
+    last_run_date: Any,
+) -> dict:
+    """Apply incremental search parameters to a request payload.
+
+    Args:
+        params: Base request parameters/body fields.
+        source_search_field: API field used for incremental filtering.
+        source_search_query: Template containing ``$last_run_date``.
+        last_run_date: Value substituted into the template.
+
+    Returns:
+        Updated request parameters.
+
+    """
+    if not source_search_field or not source_search_query or not last_run_date:
+        return params
+
+    request_params = dict(params)
+    query_template = Template(source_search_query)
+    request_params[source_search_field] = query_template.substitute(
+        last_run_date=last_run_date
+    )
+    return request_params
+
+
+def replication_key_schema_property(replication_key: str) -> dict:
+    """Build a Singer schema property for a replication key."""
+    if replication_key in ("ts",):
+        return {"type": ["integer", "string", "null"]}
+    if replication_key.startswith("@") or "timestamp" in replication_key.lower():
+        return {"type": ["string", "null"], "format": "date-time"}
+    if replication_key.endswith("_at"):
+        return {"type": ["string", "null"], "format": "date-time"}
+    return {"type": ["string", "null"]}
+
+
+def ensure_schema_has_replication_key(
+    schema: dict,
+    replication_key: Optional[str],
+    primary_keys: Optional[list] = None,
+) -> dict:
+    """Ensure inferred schema includes replication and primary key fields."""
+    properties = schema.setdefault("properties", {})
+
+    if replication_key and replication_key not in properties:
+        properties[replication_key] = replication_key_schema_property(replication_key)
+
+    for primary_key in primary_keys or []:
+        if primary_key not in properties:
+            properties[primary_key] = {"type": ["string", "null"]}
+
+    return schema
+
+
+def normalize_null_only_schema_types(schema: dict) -> dict:
+    """Convert null-only inferred properties to nullable strings."""
+    for _, details in schema.get("properties", {}).items():
+        if details.get("type") == "null":
+            details["type"] = ["string", "null"]
+    return schema
+
+
+def issue_api_request(
+    *,
+    api_url: str,
+    path: str,
+    params: dict,
+    headers: dict,
+    rest_method: str = "GET",
+    use_request_body_not_params: bool = False,
+    http_auth: Any = None,
+) -> requests.Response:
+    """Issue an API request using the tap's configured HTTP semantics."""
+    url = api_url + path
+    method = rest_method.upper()
+
+    if method == "POST":
+        if use_request_body_not_params:
+            return requests.post(
+                url,
+                json=params,
+                auth=http_auth,
+                headers=headers,
+            )
+        return requests.post(
+            url,
+            params=params,
+            auth=http_auth,
+            headers=headers,
+        )
+
+    return requests.get(
+        url,
+        params=params,
+        auth=http_auth,
+        headers=headers,
+    )
+
+
 def get_start_date(self, context: Optional[dict]) -> Any:
     """Return a start date if a DateTime bookmark is available.
 
@@ -109,7 +253,11 @@ def get_start_date(self, context: Optional[dict]) -> Any:
         An start date else and empty string.
 
     """
+    fmt = get_last_run_date_format(self.config)
     try:
-        return self.get_starting_timestamp(context).strftime("%Y-%m-%dT%H:%M:%S")
+        return self.get_starting_timestamp(context).strftime(fmt)
     except (ValueError, AttributeError):
-        return self.get_starting_replication_key_value(context)
+        return format_replication_bookmark(
+            self.get_starting_replication_key_value(context),
+            fmt,
+        )
